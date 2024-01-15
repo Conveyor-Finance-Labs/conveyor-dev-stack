@@ -1,0 +1,44 @@
+# RYex local full stack (local-mock) — docs/50 §5
+# `docker compose up` → anvil + contract deploy + GMX async auto-settlement.
+# Fully offline and deterministic. Frontend connects to 8545 (wallet) · BFF (8080 when added).
+services:
+  anvil:
+    image: ghcr.io/foundry-rs/foundry:latest
+    entrypoint: ["anvil", "--host", "0.0.0.0", "--chain-id", "31337", "--block-time", "1"]
+    ports: ["8545:8545"]
+    healthcheck:
+      test: ["CMD", "cast", "block-number", "--rpc-url", "http://localhost:8545"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  deployer: # one-shot: deploy all contracts + write addresses/local-mock.json, then exit
+    image: ghcr.io/foundry-rs/foundry:latest
+    depends_on:
+      anvil: { condition: service_healthy }
+    working_dir: /work
+    volumes:
+      - ../contracts:/work
+    environment:
+      RYEX_PROFILE: local-mock
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        forge script script/Deploy.s.sol
+        --broadcast --rpc-url http://anvil:8545
+        --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+    restart: "no"
+
+  gmx-executor: # OrderCreated detection → auto executeOrder (2-step async replay)
+    build: ./gmx-executor
+    depends_on:
+      deployer: { condition: service_completed_successfully }
+    volumes:
+      - ../contracts/addresses:/addresses:ro
+    environment:
+      RPC_URL: http://anvil:8545
+      ADDRESSES_FILE: /addresses/local-mock.json
+      KEEPER_PK: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
+      EXECUTOR_DELAY_MS: "1500" # 0=instant, >0=settlement delay sim (UI spinner testing)
+    restart: unless-stopped
+  # bff: (P7) Go BFF/Indexer/Keeper — to be added, ports 8080
